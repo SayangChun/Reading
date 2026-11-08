@@ -38,3 +38,7 @@ SORT_DESC = True
 
 # 数据源画像：auto（自动识别）/ reading_app（阅读记录 App 备份）/ generic（单文件/目录）
 SOURCE_PROFILE = "auto"
+
+# reading_app 画像：是否只展示「已读」的书（True 时过滤掉 想读/在读/弃读）
+# 默认 False —— 展示全部并标注状态；想只公开"读过的书"改成 True
+READING_APP_ONLY_READ = False

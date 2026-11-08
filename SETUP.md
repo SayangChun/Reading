@@ -32,6 +32,9 @@ Reading/
 - `score` 为 0 → 显示「未评」；越界值（数据里偶发 9/10）→ 封顶星数并如实标注；
 - 顶部统计：书籍总数、已读、书评篇数、累计阅读时长（不含书摘/笔记）。
 
+**可选**：只想公开展示「已读」的书？改 `scripts/config.py` 的
+`READING_APP_ONLY_READ = True`（默认 `False`，展示全部并标注状态）。
+
 > 若以后数据源换成单文件/目录式（JSON/CSV/Markdown/frontmatter），生成器会自动回退到
 > `generic` 画像，照样能跑（那种格式支持中英文字段、frontmatter、`books/` 目录等）。
 

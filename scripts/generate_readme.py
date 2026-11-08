@@ -437,6 +437,8 @@ def build_reading_app(source_dir: str):
             "total_seconds": b.get("total_seconds") or 0,
             "_date_parsed": date,
         })
+    if config.READING_APP_ONLY_READ:
+        records = [r for r in records if r.get("status") == "已读"]
     return sort_records(records)
 
 
