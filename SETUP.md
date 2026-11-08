@@ -15,14 +15,37 @@ Reading/
 ```
 
 ## 数据源格式要求
-`yuedujilu_backup` 仓库根目录（或 `books/`、`data/`）放一个数据文件，三选一：
+`yuedujilu_backup` 仓库里放读书记录，**以下格式都能自动识别**（根目录、或 `books/`、`data/` 子目录均可）：
+
 - `books.json`：对象数组，每条一本书（见 `books.example.json`）
 - `books.csv`：一行一本书，表头用中/英文字段名
-- `books.md`：每本书一个 `## 标题`，下面用 `- 作者: xxx` / `- 评分: 4.5` /
+- `books.md`：单文件，每本书一个 `## 标题`，下面用 `- 作者: xxx` / `- 评分: 4.5` /
   `- 阅读日期: 2024-11-12` / `- 标签: 科幻, 哲学`，正文作为书评
+- **`books/` 目录下一堆 `.md`**：每本一个文件（最常用于"阅读日记"式仓库）
+- **Markdown + YAML frontmatter**：每篇 `.md` 顶部用 `---` 包裹 `key: value`
+  元数据（Hugo/Jekyll 风格），正文作书评。例如：
+  ```markdown
+  ---
+  title: 置身事内
+  author: 兰小欢
+  rating: 4.5
+  date: 2024-11-12
+  tags: [中国经济, 政治经济学]
+  cover: https://.../cover.jpg
+  ---
+  书评正文……
+  ```
+  frontmatter 里的 `tags` 支持 `[a, b]` 列表或 `a, b` 逗号串。
 
 字段名中英文都认（书名/作者/评分/阅读日期/标签/书评/封面），
 详见 `scripts/config.py` 的 `FIELD_MAP`，缺什么往里加即可。
+
+### 本地调试字段识别
+不确定你的字段名有没有被认出来？用 `--dump-fields` 看一眼：
+```bash
+python scripts/generate_readme.py --source <目录> --dump-fields
+```
+它会列出每个文件识别到的归一化字段；没认出来的，去 `config.py` 加别名即可。
 
 ## 你只需要做一件事（二选一）
 

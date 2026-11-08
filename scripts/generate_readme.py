@@ -3,13 +3,17 @@
 generate_readme.py — 把读书记录数据源渲染成 Reading 仓库的 README.md 书单。
 
 特点：
-  1. 数据源自适应：自动寻找 books.json / books.csv / books.md / books/ 目录，
-     也接受单个 markdown 笔记（按二级标题切分每本书）。
-  2. 字段自适应：中英文混用的字段名都能识别（见 config.FIELD_MAP）。
-  3. 零第三方依赖：只用 Python 标准库，GitHub Action 的 ubuntu 直接能跑。
+  1. 数据源自适应：
+     - 单文件：books.json / books.csv / books.md（根目录、books/、data/ 均可）
+     - 目录：books/ 或 data/ 下一堆 .md（每本一个文件）
+  2. 格式自适应：Markdown 支持 YAML frontmatter（--- 包裹的 key: value）
+     与正文内 "- 字段: 值" 两种写法；JSON/CSV 直接读。
+  3. 字段自适应：中英文混用的字段名都能识别（见 config.FIELD_MAP）。
+  4. 零第三方依赖：只用 Python 标准库，GitHub Action 的 ubuntu 直接能跑。
 
 用法：
     python scripts/generate_readme.py --source <数据源目录> --output README.md
+    python scripts/generate_readme.py --source <目录> --dump-fields   # 仅打印识别到的字段，便于调试
 """
 from __future__ import annotations
 
@@ -27,38 +31,58 @@ import config  # noqa: E402
 
 
 # --------------------------------------------------------------------------
-# 1. 找数据源文件
+# 1. 找数据源文件（支持单文件 + 目录）
 # --------------------------------------------------------------------------
-def find_source_file(source_dir: str):
-    """在 source_dir 里按优先级找数据文件，返回 (路径, 类型) 或 (None, None)。"""
+def find_source_files(source_dir: str):
+    """返回 [(路径, 类型), ...]。找不到返回 []。"""
     if not source_dir or not os.path.isdir(source_dir):
-        return None, None
+        return []
 
-    candidates = [
-        ("books.json", "json"),
-        ("books.csv", "csv"),
-        ("books.md", "markdown"),
-        ("books/books.json", "json"),
-        ("data/books.json", "json"),
+    found = []
+
+    # 1) 显式单文件（按优先级）
+    explicit = [
+        ("books.json", "json"), ("books.csv", "csv"), ("books.md", "markdown"),
+        ("books/books.json", "json"), ("data/books.json", "json"),
+        ("books/books.csv", "csv"), ("data/books.csv", "csv"),
+        ("books/books.md", "markdown"), ("data/books.md", "markdown"),
         ("README.md", "markdown"),
     ]
-    for name, kind in candidates:
+    for name, kind in explicit:
         p = os.path.join(source_dir, name)
         if os.path.isfile(p):
-            return p, kind
+            found.append((p, kind))
+            return found  # 命中显式单文件即止
 
-    # 退路：扫描一级目录里的 json/csv/md
-    for fname in sorted(os.listdir(source_dir)):
-        full = os.path.join(source_dir, fname)
+    # 2) books/ 或 data/ 目录：收集里面的 .md / .json / .csv
+    for sub in ("books", "data"):
+        d = os.path.join(source_dir, sub)
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                full = os.path.join(d, fn)
+                if os.path.isfile(full):
+                    low = fn.lower()
+                    if low.endswith(".md"):
+                        found.append((full, "markdown"))
+                    elif low.endswith(".json"):
+                        found.append((full, "json"))
+                    elif low.endswith(".csv"):
+                        found.append((full, "csv"))
+            if found:
+                return found
+
+    # 3) 退路：扫描一级目录里的 json/csv/md
+    for fn in sorted(os.listdir(source_dir)):
+        full = os.path.join(source_dir, fn)
         if os.path.isfile(full):
-            low = fname.lower()
+            low = fn.lower()
             if low.endswith(".json"):
-                return full, "json"
-            if low.endswith(".csv"):
-                return full, "csv"
-            if low.endswith(".md"):
-                return full, "markdown"
-    return None, None
+                found.append((full, "json"))
+            elif low.endswith(".csv"):
+                found.append((full, "csv"))
+            elif low.endswith(".md"):
+                found.append((full, "markdown"))
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -70,71 +94,103 @@ def load_json(path: str):
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # 常见容器键
         for key in ("books", "records", "items", "data", "list"):
             if key in data and isinstance(data[key], list):
                 return data[key]
-        # 整个 dict 当成单本或一组，尝试包成列表
         return [data]
     return []
 
 
 def load_csv(path: str):
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        return [row for row in reader]
+        return [row for row in csv.DictReader(f)]
 
 
-MD_HEADING = re.compile(r"^\s{0,3}(#{2,3})\s+(.*)$")
-MD_FIELD = re.compile(r"^\s*[-*]?\s*(?:作者|author)\s*[:：]\s*(.+)$", re.I)
-MD_FIELD_GENERIC = re.compile(r"^\s*[-*]?\s*([\u4e00-\u9fffA-Za-z]+)\s*[:：]\s*(.+)$")
+FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.S)
+H1_RE = re.compile(r"^\s{0,3}#\s+(.*)$", re.M)
+FIELD_LINE = re.compile(r"^\s*[-*]?\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_]*)\s*[:：]\s*(.+)$")
+COVER_FIELDS = {"封面", "作者", "评分", "阅读日期", "日期", "完成日期", "标签", "分类",
+                "主题", "书评", "读后感", "笔记", "短评"}
+
+
+def parse_frontmatter(text: str):
+    """极简 frontmatter 解析（单层 key: value，无嵌套）。
+    返回 (dict, 剩余正文)。"""
+    m = FM_RE.match(text)
+    if not m:
+        return {}, text
+    block = m.group(1)
+    body = text[m.end():]
+    fm = {}
+    for line in block.splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if not k:
+            continue
+        v = v.strip("'\"")
+        if v.startswith("[") and v.endswith("]"):
+            inner = v[1:-1]
+            v = [x.strip().strip("'\"") for x in inner.split(",") if x.strip()]
+        fm[k] = v
+    return fm, body
 
 
 def load_markdown(path: str):
-    """解析单文件 markdown：每个二级/三级标题当作一本书，
-    标题下的 - 字段: 值 行解析为属性，其余正文作为书评。"""
+    """解析 markdown：
+    - 优先读 YAML frontmatter（--- 包裹）作为元数据
+    - 否则按二级/三级标题切分每本书，标题下 '- 字段: 值' 解析属性，正文作书评
+    - 单文件无 frontmatter 且无二级标题时，整篇当一本（标题取首个 H1）"""
     with open(path, "r", encoding="utf-8") as f:
-        lines = f.read().splitlines()
+        text = f.read()
 
+    fm, body = parse_frontmatter(text)
+    if fm:
+        # 有 frontmatter：整篇即一本，书名缺省取首个 H1，正文作书评
+        rec = dict(fm)
+        h1 = H1_RE.search(body)
+        if not rec.get("title") and not rec.get("书名") and h1:
+            rec["title"] = h1.group(1).strip()
+        if "review" not in rec and "书评" not in rec:
+            rec["_body"] = body.strip()
+        return [rec]
+
+    # 无 frontmatter：尝试按标题切分
     books = []
     cur = None
-    body = []
+    buf = []
 
     def flush():
         if cur is not None:
-            cur["_body"] = "\n".join(body).strip()
+            cur["_body"] = "\n".join(buf).strip()
             books.append(cur)
 
-    for line in lines:
-        m = MD_HEADING.match(line)
-        if m:
+    for line in text.splitlines():
+        if re.match(r"^\s{0,3}#{2,3}\s+", line):
             flush()
-            cur = {"title": m.group(2).strip()}
-            body = []
+            cur = {"title": re.sub(r"^\s{0,3}#{2,3}\s+", "", line).strip()}
+            buf = []
             continue
         if cur is None:
+            # 第一个 ## 之前的内容（含 H1 文档标题）一律忽略
             continue
-        fm = MD_FIELD.match(line)
-        if fm:
-            cur["author"] = fm.group(1).strip()
-            continue
-        fg = MD_FIELD_GENERIC.match(line)
-        if fg:
-            key = fg.group(1).strip()
-            val = fg.group(2).strip()
-            # 把中文键名也接住（评分/阅读日期/标签/书评）
-            if key in ("评分", "评分值"):
-                cur["rating"] = val
-            elif key in ("阅读日期", "日期", "完成日期"):
-                cur["date"] = val
-            elif key in ("标签", "分类", "主题"):
-                cur["tags"] = val
-            elif key in ("书评", "读后感", "笔记", "短评"):
-                cur["review"] = val
+        fm_line = FIELD_LINE.match(line)
+        if fm_line:
+            key, val = fm_line.group(1).strip(), fm_line.group(2).strip()
+            if key in COVER_FIELDS or key.lower() in ("author", "rating", "date",
+                    "read_date", "tags", "review", "cover", "isbn", "status"):
+                cur[key] = val
             continue
         if line.strip():
-            body.append(line)
+            buf.append(line)
     flush()
+
+    if not books:
+        # 整篇没有任何 ## 分节：当单本，书名取首个 H1 或文件名
+        h1 = H1_RE.search(text)
+        title = h1.group(1).strip() if h1 else os.path.splitext(os.path.basename(path))[0]
+        return [{"title": title, "_body": text.strip()}]
     return books
 
 
@@ -156,8 +212,6 @@ def _norm_key(k: str) -> str:
 
 
 def normalize(record: dict) -> dict:
-    """把一条原始记录映射到规范字段。"""
-    # 建一个 "归一化键 -> 原始值" 的索引
     idx = {}
     for k, v in record.items():
         if v is None or v == "":
@@ -170,7 +224,6 @@ def normalize(record: dict) -> dict:
             if _norm_key(alias) in idx:
                 out[std_field] = idx[_norm_key(alias)]
                 break
-        # markdown 解析塞进来的 _body 也当作书评兜底
     if "review" not in out and "_body" in record and record["_body"]:
         out["review"] = record["_body"]
     return out
@@ -185,29 +238,22 @@ def parse_rating(v):
     if isinstance(v, (int, float)):
         return float(v)
     s = str(v).strip()
-    # 已是星级字符串，原样返回
     if "★" in s or "☆" in s:
         return s
     m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if m:
-        try:
-            return float(m.group(1))
-        except ValueError:
-            return None
-    return None
+    return float(m.group(1)) if m else None
 
 
 def stars_display(rating) -> str:
     if rating is None:
         return "—"
-    if isinstance(rating, str):  # 已是星级
+    if isinstance(rating, str):
         return rating
     try:
         f = float(rating)
     except (TypeError, ValueError):
         return str(rating)
-    full = int(round(f))
-    full = max(0, min(config.RATING_MAX, full))
+    full = max(0, min(config.RATING_MAX, int(round(f))))
     return "★" * full + "☆" * (config.RATING_MAX - full)
 
 
@@ -217,22 +263,19 @@ def parse_date(v):
     s = str(v).strip()
     if not s:
         return None
-    # 纯年份
     if re.fullmatch(r"\d{4}", s):
         return f"{s}-01-01"
-    # 常见格式尝试
     for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y-%m", "%Y/%m",
                 "%d-%m-%Y", "%d/%m/%Y", "%Y%m%d"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    # 时间戳（秒/毫秒）
     if re.fullmatch(r"\d{10}", s):
         return datetime.fromtimestamp(int(s)).strftime("%Y-%m-%d")
     if re.fullmatch(r"\d{13}", s):
         return datetime.fromtimestamp(int(s) / 1000).strftime("%Y-%m-%d")
-    return None  # 解析不出就放弃排序依据
+    return None
 
 
 def parse_tags(v):
@@ -240,10 +283,9 @@ def parse_tags(v):
         return []
     if isinstance(v, list):
         return [str(t).strip() for t in v if str(t).strip()]
-    s = str(v).strip()
-    # 支持 "科幻, 哲学" / "科幻、哲学" / "科幻|哲学"
+    s = str(v).strip().strip("[]")
     parts = re.split(r"[,，、|/;/；\s]+", s)
-    return [p.strip() for p in parts if p.strip()]
+    return [p.strip().strip("'\"") for p in parts if p.strip()]
 
 
 def is_url(v) -> bool:
@@ -261,7 +303,6 @@ def sort_records(records):
     def keyfn(b):
         if config.SORT_BY == "title":
             return str(b.get("title", "")).lower()
-        # 缺失日期用极小值占位；倒序时自然落到末尾
         return b.get("_date_parsed") or "0000-00-00"
     return sorted(records, key=keyfn, reverse=config.SORT_DESC)
 
@@ -272,28 +313,20 @@ def sort_records(records):
 def render(records) -> str:
     total = len(records)
     year = datetime.now(timezone.utc).year
-    year_count = sum(
-        1 for b in records
-        if (b.get("_date_parsed") or "").startswith(str(year))
-    )
+    year_count = sum(1 for b in records if (b.get("_date_parsed") or "").startswith(str(year)))
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    lines = []
-    lines.append(f"# {config.README_TITLE}")
-    lines.append("")
+    lines = [f"# {config.README_TITLE}", ""]
     lines.append(
         f"> {config.README_INTRO}  ·  共 **{total}** 本"
         f"  ·  今年 **{year_count}** 本  ·  更新于 {generated}"
     )
     lines.append("")
 
-    # 表格
-    header = "| 封面 | 书名 | 作者 | 评分 | 阅读日期 | 标签 | 书评 |"
-    sep = "| --- | --- | --- | --- | --- | --- | --- |"
-    lines.append(header)
-    lines.append(sep)
+    lines.append("| 封面 | 书名 | 作者 | 评分 | 阅读日期 | 标签 | 书评 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
 
-    details_blocks = []
+    details = []
     for b in records:
         title = b.get("title") or "（无标题）"
         author = b.get("author") or "—"
@@ -304,22 +337,15 @@ def render(records) -> str:
         date = b.get("_date_parsed") or "—"
         tags = " ".join(f"`{t}`" for t in b.get("_tags", [])) or "—"
 
-        # 封面
         cover = b.get("cover")
-        if is_url(cover):
-            cover_cell = f'<img src="{cover.strip()}" width="48" alt="cover">'
-        else:
-            cover_cell = "—"
+        cover_cell = f'<img src="{cover.strip()}" width="48" alt="cover">' if is_url(cover) else "—"
 
-        # 书评单元格：链接 or 详情 or 无
         review = b.get("review")
-        if is_url(review):
-            review_cell = f"[书评]({review.strip()})"
-        elif is_md_link(review):
+        if is_url(review) or is_md_link(review):
             review_cell = f"[书评]({review.strip()})"
         elif review and config.EMBED_TEXT_REVIEWS:
             review_cell = "▸ 见下"
-            details_blocks.append((title, author, rating_disp, review.strip()))
+            details.append((title, author, rating_disp, review.strip()))
         else:
             review_cell = "—"
 
@@ -327,17 +353,14 @@ def render(records) -> str:
             f"| {cover_cell} | {title} | {author} | {rating_disp} "
             f"| {date} | {tags} | {review_cell} |"
         )
-
     lines.append("")
 
-    if details_blocks:
+    if details:
         lines.append("## 书评")
         lines.append("")
-        for title, author, rating_disp, text in details_blocks:
-            lines.append(f"<details>")
-            lines.append(
-                f"<summary><b>《{title}》</b> — {author} · {rating_disp}</summary>"
-            )
+        for title, author, rating_disp, text in details:
+            lines.append("<details>")
+            lines.append(f"<summary><b>《{title}》</b> — {author} · {rating_disp}</summary>")
             lines.append("")
             lines.append(text)
             lines.append("")
@@ -357,22 +380,23 @@ def render(records) -> str:
 # 7. 主流程
 # --------------------------------------------------------------------------
 def build(source_dir: str):
-    path, kind = find_source_file(source_dir)
-    if not path:
+    files = find_source_files(source_dir)
+    if not files:
         raise SystemExit(
             f"[ERROR] 在数据源目录 '{source_dir}' 里找不到 books.json / "
-            f"books.csv / books.md 或任何 json/csv/md 文件。"
+            f"books.csv / books.md 或任何 json/csv/md 文件（含 books/、data/ 子目录）。"
         )
 
-    raw = load_records(path, kind)
+    raw = []
+    for path, kind in files:
+        raw.extend(load_records(path, kind))
     if not raw:
-        raise SystemExit(f"[WARN] 数据源 {path} 解析后没有记录。")
+        raise SystemExit(f"[WARN] 数据源解析后没有记录（共 {len(files)} 个文件）。")
 
     books = []
     for rec in raw:
         b = normalize(rec)
         if not b.get("title"):
-            # 没有书名就跳过，避免空行
             continue
         b["_date_parsed"] = parse_date(b.get("date"))
         b["_tags"] = parse_tags(b.get("tags"))
@@ -380,22 +404,46 @@ def build(source_dir: str):
         books.append(b)
 
     books = sort_records(books)
-    return render(books)
+    return books, files
+
+
+def dump_fields(source_dir: str):
+    files = find_source_files(source_dir)
+    if not files:
+        print("[ERROR] 未找到任何数据文件。")
+        return
+    print(f"找到 {len(files)} 个数据源文件：")
+    for p, k in files:
+        print(f"  - [{k}] {os.path.relpath(p, source_dir)}")
+    print("\n各文件识别到的字段（归一化后）：")
+    for p, k in files:
+        recs = load_records(p, k)
+        for i, rec in enumerate(recs[:3]):
+            norm = normalize(rec)
+            keys = ", ".join(f"{kk}={vv!r}" for kk, vv in norm.items()) or "(无可识别字段)"
+            print(f"  {os.path.relpath(p, source_dir)} #{i+1}: {keys}")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Generate reading-list README.md")
     ap.add_argument("--source", required=True, help="数据源目录（yuedujilu_backup 检出路径）")
     ap.add_argument("--output", default="README.md", help="输出文件路径")
+    ap.add_argument("--dump-fields", action="store_true", help="只打印识别到的字段，便于调试格式")
     args = ap.parse_args()
 
-    md = build(args.source)
+    if args.dump_fields:
+        dump_fields(args.source)
+        return
+
+    books, files = build(args.source)
+    md = render(books)
     out_dir = os.path.dirname(os.path.abspath(args.output))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(md)
-    print(f"[OK] 已生成 {args.output}（{len(md.splitlines())} 行）")
+    print(f"[OK] 已生成 {args.output}（{len(books)} 本书，{len(md.splitlines())} 行；"
+          f"数据源 {len(files)} 个文件）")
 
 
 if __name__ == "__main__":

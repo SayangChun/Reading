@@ -4,3 +4,6 @@ data/
 # Python
 __pycache__/
 *.pyc
+
+# 内部记忆目录（不进公开仓库）
+.workbuddy-ai/
