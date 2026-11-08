@@ -1,0 +1,41 @@
+name: Sync Reading List
+
+# 自动化同步：每天北京时间 00:00 拉取私有读书记录仓库，重新生成 README.md 书单。
+# 也支持在 Actions 页面点 "Run workflow" 手动触发。
+on:
+  schedule:
+    - cron: "0 16 * * *"        # UTC 16:00 == 北京时间次日 00:00
+  workflow_dispatch: {}         # 手动按钮
+
+# 允许工作流把生成的 README 提交回本仓库
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Reading（本仓库，含生成器）
+        uses: actions/checkout@v4
+
+      - name: Checkout 读书记录（数据源）
+        uses: actions/checkout@v4
+        with:
+          repository: SayangChun/yuedujilu_backup
+          path: source
+          # 数据源是私有库时需要读令牌；公开库则 GITHUB_TOKEN 即可。
+          # 私有库请在 Reading → Settings → Secrets → Actions 里加 SOURCE_TOKEN
+          # （一个带 repo 权限的 Personal Access Token）。
+          # 下面的表达式：有 SOURCE_TOKEN 用它，否则退回 GITHUB_TOKEN（仅够读公开库）。
+          token: ${{ secrets.SOURCE_TOKEN || github.token }}
+
+      - name: Generate README
+        run: python scripts/generate_readme.py --source source --output README.md
+
+      - name: Commit & Push
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: auto-sync reading list"
+          file_pattern: "README.md"
+          commit_user_name: "reading-sync-bot"
+          commit_user_email: "reading-sync@users.noreply.github.com"
