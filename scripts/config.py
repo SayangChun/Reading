@@ -35,3 +35,6 @@ README_INTRO = "自动同步自私有读书记录仓库，每日更新。"
 # 书单按什么排序：date（阅读日期，默认倒序最新在前）或 title
 SORT_BY = "date"
 SORT_DESC = True
+
+# 数据源画像：auto（自动识别）/ reading_app（阅读记录 App 备份）/ generic（单文件/目录）
+SOURCE_PROFILE = "auto"

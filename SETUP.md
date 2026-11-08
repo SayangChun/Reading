@@ -15,37 +15,32 @@ Reading/
 ```
 
 ## 数据源格式要求
-`yuedujilu_backup` 仓库里放读书记录，**以下格式都能自动识别**（根目录、或 `books/`、`data/` 子目录均可）：
+`yuedujilu_backup` 是「阅读记录」App 的**结构化备份**，真实结构如下（生成器已内置适配，
+自动识别为 `reading_app` 画像）：
 
-- `books.json`：对象数组，每条一本书（见 `books.example.json`）
-- `books.csv`：一行一本书，表头用中/英文字段名
-- `books.md`：单文件，每本书一个 `## 标题`，下面用 `- 作者: xxx` / `- 评分: 4.5` /
-  `- 阅读日期: 2024-11-12` / `- 标签: 科幻, 哲学`，正文作为书评
-- **`books/` 目录下一堆 `.md`**：每本一个文件（最常用于"阅读日记"式仓库）
-- **Markdown + YAML frontmatter**：每篇 `.md` 顶部用 `---` 包裹 `key: value`
-  元数据（Hugo/Jekyll 风格），正文作书评。例如：
-  ```markdown
-  ---
-  title: 置身事内
-  author: 兰小欢
-  rating: 4.5
-  date: 2024-11-12
-  tags: [中国经济, 政治经济学]
-  cover: https://.../cover.jpg
-  ---
-  书评正文……
-  ```
-  frontmatter 里的 `tags` 支持 `[a, b]` 列表或 `a, b` 逗号串。
+- `data/books.json`：`{ "books": [...] }`，每本含 `name`(书名) / `author` / `category`(分类) /
+  `status`(想读·在读·已读·弃读) / `score`(0–5，0 表示未评) / `isbn` / `note_count` / `review_count`。
+  **没有封面字段、没有阅读日期**。
+- `data/reviews.json`：`{ "reviews": [...] }`，书评按 `book_id` 关联；`title`/`content` 可能为空（空的不展示）。
+- `data/notes.json`：`{ "notes": [...] }`，书摘（338 条）。**书摘/笔记不在公开 README 中展示**，仅作内部参考。
 
-字段名中英文都认（书名/作者/评分/阅读日期/标签/书评/封面），
-详见 `scripts/config.py` 的 `FIELD_MAP`，缺什么往里加即可。
+生成器对 `reading_app` 画像会：
+
+- 用 `books.json` 出书单表格：书名 / 作者 / 评分 / 状态 / 分类 / 阅读日期 / 书评；
+- **按 `book_id` 把书评关联到对应书**，非空才在「书评」列与末尾 `<details>` 折叠区展示；
+- 阅读日期缺失时，用该书书评日期推导（无书评则留空）；
+- `score` 为 0 → 显示「未评」；越界值（数据里偶发 9/10）→ 封顶星数并如实标注；
+- 顶部统计：书籍总数、已读、书评篇数、累计阅读时长（不含书摘/笔记）。
+
+> 若以后数据源换成单文件/目录式（JSON/CSV/Markdown/frontmatter），生成器会自动回退到
+> `generic` 画像，照样能跑（那种格式支持中英文字段、frontmatter、`books/` 目录等）。
 
 ### 本地调试字段识别
 不确定你的字段名有没有被认出来？用 `--dump-fields` 看一眼：
 ```bash
 python scripts/generate_readme.py --source <目录> --dump-fields
 ```
-它会列出每个文件识别到的归一化字段；没认出来的，去 `config.py` 加别名即可。
+它会列出识别出的画像与每本书的字段；没认出来的，去 `scripts/config.py` 的 `FIELD_MAP` 加别名即可。
 
 ## 你只需要做一件事（二选一）
 
@@ -74,7 +69,10 @@ python scripts/generate_readme.py --source <目录> --dump-fields
 ```bash
 # 用样例数据生成一次，看 README 长什么样
 python scripts/generate_readme.py --source data --output README.md
-# 注意：data/ 里放的是样例；真实跑时 source 指向检出后的 yuedujilu_backup
+
+# 直接指向本地备份目录（Windows 下用 E:/... 这种写法，别用 /e/...，否则 Python 找不到）
+python scripts/generate_readme.py --source E:/project/yuedujilu_backup --output README.md
+# 真实跑时，GitHub 上 source 指向 workflow 检出的 yuedujilu_backup（相对路径 source/）
 ```
 
 ## 常见问题

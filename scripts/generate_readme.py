@@ -377,6 +377,139 @@ def render(records) -> str:
 
 
 # --------------------------------------------------------------------------
+# 6b. reading_app 画像：分表读取 + 按 book_id 关联书评
+#     （data/books.json + data/reviews.json + data/notes.json）
+# --------------------------------------------------------------------------
+def _load_json_file(path: str, key: str):
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        d = json.load(f)
+    if isinstance(d, dict) and key in d and isinstance(d[key], list):
+        return d[key]
+    if isinstance(d, list):
+        return d
+    return []
+
+
+def _join_reviews(reviews):
+    """按 book_id 聚合非空书评，返回 {book_id: '标题\\n正文...'}。"""
+    out = {}
+    for r in reviews:
+        bid = r.get("book_id")
+        if not bid:
+            continue
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").strip()
+        if not content and not title:
+            continue
+        block = (title + "\n\n" + content).strip() if title and content else (title or content)
+        out.setdefault(bid, []).append(block)
+    return {k: "\n\n".join(v) for k, v in out.items()}
+
+
+def build_reading_app(source_dir: str):
+    data_dir = os.path.join(source_dir, "data")
+    books = _load_json_file(os.path.join(data_dir, "books.json"), "books")
+    reviews = _load_json_file(os.path.join(data_dir, "reviews.json"), "reviews")
+
+    rev_text = _join_reviews(reviews)
+
+    records = []
+    for b in books:
+        bid = b.get("id")
+        score = b.get("score")
+        rating = None if score in (0, None, "") else float(score)
+        rtext = rev_text.get(bid, "")
+        rv_dates = [parse_date(r.get("date")) for r in reviews
+                    if r.get("book_id") == bid and parse_date(r.get("date"))]
+        # 阅读日期：仅由书评日期推导（不展示书摘/笔记）
+        date = max(rv_dates) if rv_dates else None
+        records.append({
+            "title": b.get("name") or "(无书名)",
+            "author": b.get("author") or "",
+            "publisher": b.get("publisher") or "",
+            "category": b.get("category") or "",
+            "status": b.get("status") or "",
+            "rating": rating,
+            "tags": b.get("category") or "",
+            "review": rtext,
+            "total_seconds": b.get("total_seconds") or 0,
+            "_date_parsed": date,
+        })
+    return sort_records(records)
+
+
+def render_reading_app(records) -> str:
+    total = len(records)
+    read = sum(1 for b in records if b.get("status") == "已读")
+    reviews_n = sum(1 for b in records if b.get("review"))
+    total_sec = sum(int(b.get("total_seconds") or 0) for b in records)
+    hours = total_sec / 3600.0
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    lines = [f"# {config.README_TITLE}", ""]
+    lines.append(
+        f"> {config.README_INTRO}  ·  书籍 **{total}** 本（已读 **{read}**）"
+        f"  ·  书评 **{reviews_n}** 篇"
+        f"  ·  累计阅读约 **{hours:.0f}** 小时  ·  更新于 {generated}"
+    )
+    lines.append("")
+
+    lines.append("| 书名 | 作者 | 评分 | 状态 | 分类 | 阅读日期 | 书评 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+
+    details = []
+    for b in records:
+        title = b.get("title") or "（无书名）"
+        author = b.get("author") or "—"
+        rating_raw = b.get("rating")
+        rating_disp = stars_display(rating_raw) if rating_raw is not None else "未评"
+        if isinstance(rating_raw, (int, float)):
+            if rating_raw <= config.RATING_MAX:
+                rating_disp = f"{rating_disp} {rating_raw}/5"
+            else:
+                # 数据偶发越界（如 9/10），封顶星数并如实标注
+                rating_disp = f"{rating_disp} ({rating_raw})"
+        status = b.get("status") or "—"
+        category = b.get("category") or "—"
+        date = b.get("_date_parsed") or "—"
+        review = b.get("review")
+        if review:
+            review_cell = "▸ 见下"
+            details.append((title, author, rating_disp, status, review))
+        else:
+            review_cell = "—"
+        lines.append(
+            f"| {title} | {author} | {rating_disp} | {status} "
+            f"| {category} | {date} | {review_cell} |"
+        )
+    lines.append("")
+
+    if details:
+        lines.append("## 书评")
+        lines.append("")
+        for title, author, rating_disp, status, text in details:
+            lines.append("<details>")
+            lines.append(
+                f"<summary><b>《{title}》</b> — {author} · {rating_disp} · {status}</summary>"
+            )
+            lines.append("")
+            lines.append(text)
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
+    lines.append("---")
+    lines.append(
+        "_本页由 GitHub Action 自动生成，请勿手动编辑；"
+        "读书记录在私有仓库 yuedujilu_backup 中维护。_"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # 7. 主流程
 # --------------------------------------------------------------------------
 def build(source_dir: str):
@@ -424,6 +557,16 @@ def dump_fields(source_dir: str):
             print(f"  {os.path.relpath(p, source_dir)} #{i+1}: {keys}")
 
 
+def _detect_profile(source_dir: str):
+    profile = config.SOURCE_PROFILE
+    if profile != "auto":
+        return profile
+    if (os.path.isfile(os.path.join(source_dir, "data", "books.json"))
+            and os.path.isfile(os.path.join(source_dir, "data", "reviews.json"))):
+        return "reading_app"
+    return "generic"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Generate reading-list README.md")
     ap.add_argument("--source", required=True, help="数据源目录（yuedujilu_backup 检出路径）")
@@ -431,19 +574,35 @@ def main():
     ap.add_argument("--dump-fields", action="store_true", help="只打印识别到的字段，便于调试格式")
     args = ap.parse_args()
 
+    profile = _detect_profile(args.source)
+    print(f"[INFO] 数据源画像：{profile}")
+
     if args.dump_fields:
-        dump_fields(args.source)
+        if profile == "reading_app":
+            recs = build_reading_app(args.source)
+            print(f"reading_app：{len(recs)} 本书；字段示例：")
+            for r in recs[:3]:
+                print("  ", {k: r[k] for k in ("title", "author", "rating",
+                      "status", "category", "_date_parsed", "review_count")})
+        else:
+            dump_fields(args.source)
         return
 
-    books, files = build(args.source)
-    md = render(books)
+    if profile == "reading_app":
+        records = build_reading_app(args.source)
+        md = render_reading_app(records)
+        n = len(records)
+    else:
+        books, files = build(args.source)
+        md = render(books)
+        n = len(books)
+
     out_dir = os.path.dirname(os.path.abspath(args.output))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(md)
-    print(f"[OK] 已生成 {args.output}（{len(books)} 本书，{len(md.splitlines())} 行；"
-          f"数据源 {len(files)} 个文件）")
+    print(f"[OK] 已生成 {args.output}（{n} 本书，{len(md.splitlines())} 行）")
 
 
 if __name__ == "__main__":
