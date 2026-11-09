@@ -37,15 +37,16 @@ jobs:
           # 下面的表达式：有 SOURCE_TOKEN 用它，否则退回 GITHUB_TOKEN（仅够读公开库）。
           token: ${{ secrets.SOURCE_TOKEN || github.token }}
 
-      - name: Generate README（含封面）
-        # 封面会下载到本仓库 covers/ 并用相对路径引用；已存在的封面会复用缓存，
-        # 所以日常同步不会反复请求第三方 CDN，只有新增书籍 / 换了封面的书才下载。
+      - name: Generate README + SHELF（含封面）
+        # README 只展示已读完的书；在读/想读/弃读写入次级页面 SHELF.md。
+        # 封面下载到 covers/ 并用绝对地址引用；已存在的封面复用缓存，
+        # 只有新增书籍 / 换了封面的书才重新下载。
         run: python scripts/generate_readme.py --source source --output README.md --covers-dir covers
 
       - name: Commit & Push
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: auto-sync reading list (with covers)"
-          file_pattern: "README.md covers/"
+          file_pattern: "README.md SHELF.md covers/"
           commit_user_name: "reading-sync-bot"
           commit_user_email: "reading-sync@users.noreply.github.com"

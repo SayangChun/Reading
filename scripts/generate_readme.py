@@ -321,10 +321,17 @@ def _esc(s) -> str:
     return html.escape(str(s or ""), quote=True)
 
 
+def _cover_src(rel: str) -> str:
+    """仓库内相对路径 -> GitHub 上可直接加载的绝对地址。"""
+    base = str(getattr(config, "COVER_BASE_URL", "") or "").rstrip("/")
+    return f"{base}/{rel}" if base else rel
+
+
 def _cover_img(rel: str, width: int, title: str) -> str:
     """封面缩略图，点击跳到仓库里的原图。"""
+    src = _cover_src(rel)
     alt = _esc(f"《{title}》封面")
-    return f'<a href="{_esc(rel)}"><img src="{_esc(rel)}" width="{width}" alt="{alt}"></a>'
+    return f'<a href="{_esc(src)}"><img src="{_esc(src)}" width="{width}" alt="{alt}"></a>'
 
 
 def _cover_cell(b: dict, title: str, width: int) -> str:
@@ -512,23 +519,32 @@ def build_reading_app(source_dir: str):
     return sort_records(records)
 
 
-def render_reading_app(records) -> str:
-    total = len(records)
-    read = sum(1 for b in records if b.get("status") == "已读")
-    reviews_n = sum(1 for b in records if b.get("review"))
+def render_reading_app(records):
+    """返回 (README.md 内容, 次级书架页内容或 None)。
+
+    主页面只放已读完的书；未读完的写进独立的次级页面，README 底部留一行入口。
+    """
+    if config.PRIMARY_ONLY_READ:
+        primary = [b for b in records if b.get("status") == "已读"]
+        secondary = [b for b in records if b.get("status") != "已读"]
+    else:
+        primary, secondary = list(records), []
+
+    total = len(primary)
+    reviews_n = sum(1 for b in primary if b.get("review"))
     total_sec = sum(int(b.get("total_seconds") or 0) for b in records)
     hours = total_sec / 3600.0
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [f"# {config.README_TITLE}", ""]
     lines.append(
-        f"> {config.README_INTRO}  ·  书籍 **{total}** 本（已读 **{read}**）"
+        f"> {config.README_INTRO}  ·  已读 **{total}** 本"
         f"  ·  书评 **{reviews_n}** 篇"
         f"  ·  累计阅读约 **{hours:.0f}** 小时  ·  更新于 {generated}"
     )
     lines.append("")
 
-    lines.extend(_cover_wall(records))
+    lines.extend(_cover_wall(primary))
 
     show_col = config.SHOW_COVERS and config.SHOW_COVER_IN_TABLE
     if show_col:
@@ -539,7 +555,7 @@ def render_reading_app(records) -> str:
         lines.append("| --- | --- | --- | --- | --- | --- | --- |")
 
     details = []
-    for b in records:
+    for b in primary:
         title = b.get("title") or "（无书名）"
         author = b.get("author") or "—"
         rating_raw = b.get("rating")
@@ -581,12 +597,56 @@ def render_reading_app(records) -> str:
             lines.append("</details>")
             lines.append("")
 
+    if secondary and config.SHOW_UNFINISHED_LINK and config.UNFINISHED_FILE:
+        lines.append(
+            f"> 另有 **{len(secondary)}** 本在读 / 想读 / 弃读，"
+            f"见 [{config.UNFINISHED_FILE}]({config.UNFINISHED_FILE})。"
+        )
+        lines.append("")
+
     lines.append("---")
     lines.append(
         "_本页由 GitHub Action 自动生成，请勿手动编辑；"
         "读书记录在私有仓库 yuedujilu_backup 中维护。_"
     )
     lines.append("")
+
+    shelf = render_shelf(secondary) if (secondary and config.UNFINISHED_FILE) else None
+    return "\n".join(lines), shelf
+
+
+def render_shelf(records) -> str:
+    """次级页面：在读 / 想读 / 弃读的书，不占主 README 首屏。"""
+    status_count = {}
+    for b in records:
+        s = str(b.get("status") or "未标注")
+        status_count[s] = status_count.get(s, 0) + 1
+    breakdown = " · ".join(f"{k} **{v}**" for k, v in sorted(status_count.items()))
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    lines = [
+        "# 书架 · 未读完", "",
+        f"> 共 **{len(records)}** 本（{breakdown}）  ·  更新于 {generated}", "",
+        "主页面 [README.md](README.md) 只展示已读完的书与书评；这里是还没读完的书架。", "",
+    ]
+    lines.extend(_cover_wall(records))
+
+    show_col = config.SHOW_COVERS and config.SHOW_COVER_IN_TABLE
+    if show_col:
+        lines.append("| 封面 | 书名 | 作者 | 状态 | 分类 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+    else:
+        lines.append("| 书名 | 作者 | 状态 | 分类 |")
+        lines.append("| --- | --- | --- | --- |")
+    for b in records:
+        title = b.get("title") or "（无书名）"
+        author = b.get("author") or "—"
+        status = b.get("status") or "—"
+        category = b.get("category") or "—"
+        cover_cell = _cover_cell(b, title, config.COVER_TABLE_WIDTH)
+        prefix = f"| {cover_cell} " if show_col else "|"
+        lines.append(f"{prefix}| {title} | {author} | {status} | {category} |")
+    lines += ["", "---", "_本页由 GitHub Action 自动生成，请勿手动编辑。_", ""]
     return "\n".join(lines)
 
 
@@ -682,10 +742,8 @@ def main():
 
     if profile == "reading_app":
         records = build_reading_app(args.source)
-        renderer = render_reading_app
     else:
         records, _ = build(args.source)
-        renderer = render
 
     # --no-covers 要连渲染一起关掉，否则会出一面全是"暂无封面"的空墙
     if args.no_covers:
@@ -708,7 +766,10 @@ def main():
                 config.COVER_OVERRIDES_FILE),
         )
 
-    md = renderer(records)
+    if profile == "reading_app":
+        md, shelf_md = render_reading_app(records)
+    else:
+        md, shelf_md = render(records), None
     n = len(records)
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
@@ -716,7 +777,13 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(md)
-    print(f"[OK] 已生成 {args.output}（{n} 本书，{len(md.splitlines())} 行）")
+    print(f"[OK] 已生成 {args.output}（{n} 条记录，{len(md.splitlines())} 行）")
+
+    if shelf_md and config.UNFINISHED_FILE:
+        shelf_path = os.path.join(out_dir, config.UNFINISHED_FILE)
+        with open(shelf_path, "w", encoding="utf-8") as f:
+            f.write(shelf_md)
+        print(f"[OK] 已生成 {shelf_path}（次级书架，{len(shelf_md.splitlines())} 行）")
 
 
 if __name__ == "__main__":

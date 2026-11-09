@@ -39,8 +39,20 @@ SORT_DESC = True
 # 数据源画像：auto（自动识别）/ reading_app（阅读记录 App 备份）/ generic（单文件/目录）
 SOURCE_PROFILE = "auto"
 
-# reading_app 画像：是否只展示「已读」的书（True 时过滤掉 想读/在读/弃读）
-# 默认 False —— 展示全部并标注状态；想只公开"读过的书"改成 True
+# --------------------------------------------------------------------------
+# 展示结构：主页面只展示「读完的书」，未读完的放次级页面
+# --------------------------------------------------------------------------
+# True  -> README.md 的封面墙 / 书单 / 书评只含 status == "已读" 的书；
+#          其余（在读 / 想读 / 弃读）写进 UNFINISHED_FILE，README 底部留一个入口链接。
+# False -> 保持旧行为，所有书平铺在 README.md 里。
+PRIMARY_ONLY_READ = True
+# 次级书架页面文件名（相对 README.md）；设成 "" 则不生成
+UNFINISHED_FILE = "SHELF.md"
+# 是否在 README 底部显示通往次级页面的链接
+SHOW_UNFINISHED_LINK = True
+
+# reading_app 画像：从数据源层面就丢掉非「已读」的书（比 PRIMARY_ONLY_READ 更彻底）。
+# 注意：开启后次级页面也会是空的，一般保持 False，用 PRIMARY_ONLY_READ 分区即可。
 READING_APP_ONLY_READ = False
 
 # --------------------------------------------------------------------------
@@ -59,6 +71,10 @@ COVER_WALL_TITLE_MAX = 12   # 封面墙里书名最多显示几个字（超出�
 
 # 封面文件存放目录（相对 README.md），会一起提交进仓库
 COVER_DIR = "covers"
+# GitHub README 渲染层不会把 <img src="covers/x.jpg"> 的相对地址重写成可访问的绝对地址
+# （实测 /markdown 与 /readme 渲染接口都原样返回相对路径），所以 README 里必须写绝对地址。
+# 换仓库 / 改分支时改这一行；留空则退回相对路径（适合非 GitHub 场景）。
+COVER_BASE_URL = "https://raw.githubusercontent.com/SayangChun/Reading/main"
 # 是否从源仓库的 raw/BOOK.db 里兜底读取封面链接
 COVER_USE_SOURCE_DB = True
 # 下载并发数 / 单张超时（秒）
