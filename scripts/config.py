@@ -42,3 +42,34 @@ SOURCE_PROFILE = "auto"
 # reading_app 画像：是否只展示「已读」的书（True 时过滤掉 想读/在读/弃读）
 # 默认 False —— 展示全部并标注状态；想只公开"读过的书"改成 True
 READING_APP_ONLY_READ = False
+
+# --------------------------------------------------------------------------
+# 封面设置
+# --------------------------------------------------------------------------
+# 是否展示封面（关掉后 README 退回纯文字书单）
+SHOW_COVERS = True
+# 书单表格里的「封面」列
+SHOW_COVER_IN_TABLE = True
+# 顶部「封面墙」网格（每本书一张大一点的图，点开可看大图）
+SHOW_COVER_WALL = True
+COVER_WALL_COLUMNS = 6      # 每行几本
+COVER_WALL_WIDTH = 96       # 封面墙图片宽度 px
+COVER_TABLE_WIDTH = 44      # 表格缩略图宽度 px
+COVER_WALL_TITLE_MAX = 12   # 封面墙里书名最多显示几个字（超出省略，alt 里有全名）
+
+# 封面文件存放目录（相对 README.md），会一起提交进仓库
+COVER_DIR = "covers"
+# 是否从源仓库的 raw/BOOK.db 里兜底读取封面链接
+COVER_USE_SOURCE_DB = True
+# 下载并发数 / 单张超时（秒）
+COVER_WORKERS = 6
+COVER_TIMEOUT = 15
+
+# 数据库里也找不到封面时，是否用公开图书 API（Google Books）按书名+作者兜底搜封面。
+# 只在缺封面时请求，命中过一次就会缓存到 covers/，不会每次同步都查。
+COVER_API_FALLBACK = True
+COVER_API_TIMEOUT = 10
+
+# 手动封面映射文件（放在仓库根目录，可选）。格式：{"书名或书籍ID": "https://...封面图"}
+# 优先级最高，用来兜住自动渠道都找不到的书。文件不存在时自动跳过。
+COVER_OVERRIDES_FILE = "covers.json"

@@ -18,6 +18,14 @@ jobs:
       - name: Checkout Reading（本仓库，含生成器）
         uses: actions/checkout@v4
 
+      - name: 检查数据源访问配置
+        env:
+          HAS_SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN != '' }}
+        run: |
+          if [ "$HAS_SOURCE_TOKEN" != "true" ]; then
+            echo "::warning::未配置 SOURCE_TOKEN：若 yuedujilu_backup 仍是私有库，下一步检出会失败。请在 Reading → Settings → Secrets and variables → Actions 添加带 repo 权限的 PAT，或把源库改为 Public。"
+          fi
+
       - name: Checkout 读书记录（数据源）
         uses: actions/checkout@v4
         with:
@@ -29,13 +37,15 @@ jobs:
           # 下面的表达式：有 SOURCE_TOKEN 用它，否则退回 GITHUB_TOKEN（仅够读公开库）。
           token: ${{ secrets.SOURCE_TOKEN || github.token }}
 
-      - name: Generate README
-        run: python scripts/generate_readme.py --source source --output README.md
+      - name: Generate README（含封面）
+        # 封面会下载到本仓库 covers/ 并用相对路径引用；已存在的封面会复用缓存，
+        # 所以日常同步不会反复请求第三方 CDN，只有新增书籍 / 换了封面的书才下载。
+        run: python scripts/generate_readme.py --source source --output README.md --covers-dir covers
 
       - name: Commit & Push
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: auto-sync reading list"
-          file_pattern: "README.md"
+          commit_message: "chore: auto-sync reading list (with covers)"
+          file_pattern: "README.md covers/"
           commit_user_name: "reading-sync-bot"
           commit_user_email: "reading-sync@users.noreply.github.com"

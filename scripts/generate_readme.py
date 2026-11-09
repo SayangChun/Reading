@@ -9,16 +9,22 @@ generate_readme.py — 把读书记录数据源渲染成 Reading 仓库的 READM
   2. 格式自适应：Markdown 支持 YAML frontmatter（--- 包裹的 key: value）
      与正文内 "- 字段: 值" 两种写法；JSON/CSV 直接读。
   3. 字段自适应：中英文混用的字段名都能识别（见 config.FIELD_MAP）。
-  4. 零第三方依赖：只用 Python 标准库，GitHub Action 的 ubuntu 直接能跑。
+  4. 封面本地化：优先用记录里的 cover 字段，其次读源库 raw/BOOK.db 的
+     BOOKLISTTABLE.coverUrl，下载到本仓库 covers/ 后用相对路径引用，
+     拿不到封面则生成 SVG 占位图（见 covers.py）。
+  5. 零第三方依赖：只用 Python 标准库，GitHub Action 的 ubuntu 直接能跑。
 
 用法：
     python scripts/generate_readme.py --source <数据源目录> --output README.md
     python scripts/generate_readme.py --source <目录> --dump-fields   # 仅打印识别到的字段，便于调试
+    python scripts/generate_readme.py --source <目录> --output README.md --offline
+    python scripts/generate_readme.py --source <目录> --output README.md --refresh-covers
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import os
 import re
@@ -28,6 +34,7 @@ from datetime import datetime, timezone
 # 让脚本无论从哪里调用都能 import 到同目录的 config
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config  # noqa: E402
+import covers  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -310,6 +317,64 @@ def sort_records(records):
 # --------------------------------------------------------------------------
 # 6. 渲染 README
 # --------------------------------------------------------------------------
+def _esc(s) -> str:
+    return html.escape(str(s or ""), quote=True)
+
+
+def _cover_img(rel: str, width: int, title: str) -> str:
+    """封面缩略图，点击跳到仓库里的原图。"""
+    alt = _esc(f"《{title}》封面")
+    return f'<a href="{_esc(rel)}"><img src="{_esc(rel)}" width="{width}" alt="{alt}"></a>'
+
+
+def _cover_cell(b: dict, title: str, width: int) -> str:
+    rel = b.get("_cover_rel")
+    if rel:
+        return _cover_img(rel, width, title)
+    # 没跑封面本地化时（例如单独调 render），退回数据源自带的外链
+    if is_url(b.get("cover")):
+        return f'<img src="{_esc(b["cover"].strip())}" width="{width}" alt="{_esc(title)}">'
+    return "—"
+
+
+def _cover_wall(records) -> list:
+    """顶部封面墙：HTML table 网格（GitHub README 支持，且不依赖 CSS）。"""
+    if not (config.SHOW_COVERS and config.SHOW_COVER_WALL):
+        return []
+    cols = max(1, int(config.COVER_WALL_COLUMNS))
+    maxlen = int(config.COVER_WALL_TITLE_MAX)
+    width = int(config.COVER_WALL_WIDTH)
+
+    lines = ["## 封面墙", "",
+             f"<sub>共 {len(records)} 本 · 点击封面可查看大图</sub>", "", "<table>"]
+    for start in range(0, len(records), cols):
+        chunk = records[start:start + cols]
+        lines.append("<tr>")
+        for b in chunk:
+            title = str(b.get("title") or "（无书名）")
+            short = title if len(title) <= maxlen else title[:maxlen - 1] + "…"
+            rel = b.get("_cover_rel")
+            img = _cover_img(rel, width, title) if rel else "<sub>暂无封面</sub>"
+            status = str(b.get("status") or "").strip()
+            meta = f"<br><sub>{_esc(status)}</sub>" if status else ""
+            lines.append(
+                f'<td align="center" valign="top" width="{100 // cols}%">'
+                f'{img}<br><sub>{_esc(short)}</sub>{meta}</td>'
+            )
+        lines.extend("<td></td>" for _ in range(cols - len(chunk)))
+        lines.append("</tr>")
+    lines += ["</table>", ""]
+    return lines
+
+
+def _table_header(extra_cover: bool) -> list:
+    if extra_cover:
+        return ["| 封面 | 书名 | 作者 | 评分 | 阅读日期 | 标签 | 书评 |",
+                "| --- | --- | --- | --- | --- | --- | --- |"]
+    return ["| 书名 | 作者 | 评分 | 阅读日期 | 标签 | 书评 |",
+            "| --- | --- | --- | --- | --- | --- |"]
+
+
 def render(records) -> str:
     total = len(records)
     year = datetime.now(timezone.utc).year
@@ -323,8 +388,10 @@ def render(records) -> str:
     )
     lines.append("")
 
-    lines.append("| 封面 | 书名 | 作者 | 评分 | 阅读日期 | 标签 | 书评 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.extend(_cover_wall(records))
+
+    show_col = config.SHOW_COVERS and config.SHOW_COVER_IN_TABLE
+    lines.extend(_table_header(show_col))
 
     details = []
     for b in records:
@@ -337,8 +404,7 @@ def render(records) -> str:
         date = b.get("_date_parsed") or "—"
         tags = " ".join(f"`{t}`" for t in b.get("_tags", [])) or "—"
 
-        cover = b.get("cover")
-        cover_cell = f'<img src="{cover.strip()}" width="48" alt="cover">' if is_url(cover) else "—"
+        cover_cell = _cover_cell(b, title, config.COVER_TABLE_WIDTH)
 
         review = b.get("review")
         if is_url(review) or is_md_link(review):
@@ -349,8 +415,9 @@ def render(records) -> str:
         else:
             review_cell = "—"
 
+        prefix = f"| {cover_cell} " if show_col else "|"
         lines.append(
-            f"| {cover_cell} | {title} | {author} | {rating_disp} "
+            f"{prefix}| {title} | {author} | {rating_disp} "
             f"| {date} | {tags} | {review_cell} |"
         )
     lines.append("")
@@ -426,6 +493,9 @@ def build_reading_app(source_dir: str):
         # 阅读日期：仅由书评日期推导（不展示书摘/笔记）
         date = max(rv_dates) if rv_dates else None
         records.append({
+            "_id": b.get("id"),
+            "cover": b.get("cover") or "",
+            "isbn": b.get("isbn") or "",
             "title": b.get("name") or "(无书名)",
             "author": b.get("author") or "",
             "publisher": b.get("publisher") or "",
@@ -458,8 +528,15 @@ def render_reading_app(records) -> str:
     )
     lines.append("")
 
-    lines.append("| 书名 | 作者 | 评分 | 状态 | 分类 | 阅读日期 | 书评 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.extend(_cover_wall(records))
+
+    show_col = config.SHOW_COVERS and config.SHOW_COVER_IN_TABLE
+    if show_col:
+        lines.append("| 封面 | 书名 | 作者 | 评分 | 状态 | 分类 | 阅读日期 | 书评 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    else:
+        lines.append("| 书名 | 作者 | 评分 | 状态 | 分类 | 阅读日期 | 书评 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
 
     details = []
     for b in records:
@@ -482,8 +559,10 @@ def render_reading_app(records) -> str:
             details.append((title, author, rating_disp, status, review))
         else:
             review_cell = "—"
+        cover_cell = _cover_cell(b, title, config.COVER_TABLE_WIDTH)
+        prefix = f"| {cover_cell} " if show_col else "|"
         lines.append(
-            f"| {title} | {author} | {rating_disp} | {status} "
+            f"{prefix}| {title} | {author} | {rating_disp} | {status} "
             f"| {category} | {date} | {review_cell} |"
         )
     lines.append("")
@@ -533,6 +612,7 @@ def build(source_dir: str):
         b = normalize(rec)
         if not b.get("title"):
             continue
+        b["_id"] = rec.get("id") or rec.get("book_id") or rec.get("bookId")
         b["_date_parsed"] = parse_date(b.get("date"))
         b["_tags"] = parse_tags(b.get("tags"))
         b["rating"] = parse_rating(b.get("rating"))
@@ -574,6 +654,16 @@ def main():
     ap.add_argument("--source", required=True, help="数据源目录（yuedujilu_backup 检出路径）")
     ap.add_argument("--output", default="README.md", help="输出文件路径")
     ap.add_argument("--dump-fields", action="store_true", help="只打印识别到的字段，便于调试格式")
+    ap.add_argument("--covers-dir", default=config.COVER_DIR,
+                    help="封面图片存放目录（相对 README.md），默认 covers")
+    ap.add_argument("--no-covers", action="store_true", help="本次不处理封面，只出纯文字书单")
+    ap.add_argument("--offline", action="store_true",
+                    help="不联网下载封面，只用已缓存的封面 / 占位图")
+    ap.add_argument("--refresh-covers", action="store_true", help="忽略缓存，强制重新下载全部封面")
+    ap.add_argument("--no-db-covers", action="store_true",
+                    help="不从源库 raw/BOOK.db 读取封面链接")
+    ap.add_argument("--no-api-covers", action="store_true",
+                    help="缺封面时不查公开图书 API")
     args = ap.parse_args()
 
     profile = _detect_profile(args.source)
@@ -592,12 +682,34 @@ def main():
 
     if profile == "reading_app":
         records = build_reading_app(args.source)
-        md = render_reading_app(records)
-        n = len(records)
+        renderer = render_reading_app
     else:
-        books, files = build(args.source)
-        md = render(books)
-        n = len(books)
+        records, _ = build(args.source)
+        renderer = render
+
+    # --no-covers 要连渲染一起关掉，否则会出一面全是"暂无封面"的空墙
+    if args.no_covers:
+        config.SHOW_COVERS = False
+
+    # 先本地化封面（写入 records["_cover_rel"]），再渲染
+    if config.SHOW_COVERS:
+        covers.attach_covers(
+            records, args.source, args.output,
+            covers_dir=args.covers_dir,
+            offline=args.offline,
+            refresh=args.refresh_covers,
+            workers=config.COVER_WORKERS,
+            timeout=config.COVER_TIMEOUT,
+            use_db=config.COVER_USE_SOURCE_DB and not args.no_db_covers,
+            api_enabled=config.COVER_API_FALLBACK and not args.no_api_covers,
+            api_timeout=config.COVER_API_TIMEOUT,
+            overrides=covers.load_overrides(
+                os.path.dirname(os.path.abspath(args.output)),
+                config.COVER_OVERRIDES_FILE),
+        )
+
+    md = renderer(records)
+    n = len(records)
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
     if out_dir:

@@ -9,7 +9,10 @@
 Reading/
 ├── .github/workflows/sync.yml   # 定时 + 手动触发的工作流
 ├── scripts/generate_readme.py   # 生成器（零依赖，标准库即可）
-├── scripts/config.py            # 字段映射 / 渲染选项（按需改）
+├── scripts/covers.py            # 封面解析 + 下载 + 本地化（零依赖）
+├── scripts/test_covers.py       # 封面自动化的离线回归测试（python scripts/test_covers.py）
+├── scripts/config.py            # 字段映射 / 封面与渲染选项（按需改）
+├── covers/                      # 自动生成并提交的封面图片（29 张约 1 MB）
 ├── books.example.json           # 数据源期望格式的样例（仅供参考，不进生成）
 └── README.md                    # 自动生成，勿手改
 ```
@@ -20,7 +23,9 @@ Reading/
 
 - `data/books.json`：`{ "books": [...] }`，每本含 `name`(书名) / `author` / `category`(分类) /
   `status`(想读·在读·已读·弃读) / `score`(0–5，0 表示未评) / `isbn` / `note_count` / `review_count`。
-  **没有封面字段、没有阅读日期**。
+  **没有封面字段、没有阅读日期、isbn 也全为空** —— 封面改从下面的原始数据库里取。
+- `raw/BOOK.db`：App 原始 SQLite 备份，`BOOKLISTTABLE.coverUrl` 里存着每本书的封面链接
+  （29/29 本都有），生成器按规范化书名**精确匹配**（避免《强风吹拂》与《强风吹拂（影视）》串图）。
 - `data/reviews.json`：`{ "reviews": [...] }`，书评按 `book_id` 关联；`title`/`content` 可能为空（空的不展示）。
 - `data/notes.json`：`{ "notes": [...] }`，书摘（338 条）。**书摘/笔记不在公开 README 中展示**，仅作内部参考。
 
@@ -37,6 +42,74 @@ Reading/
 
 > 若以后数据源换成单文件/目录式（JSON/CSV/Markdown/frontmatter），生成器会自动回退到
 > `generic` 画像，照样能跑（那种格式支持中英文字段、frontmatter、`books/` 目录等）。
+
+## 封面
+
+README 顶部是「封面墙」网格（每行 6 本，点击封面看大图），书单表格里也有一列缩略图。
+**封面图会下载并保存在本仓库 `covers/`，README 用相对路径引用**，而不是直接外链到读书 App 的 CDN：
+
+- 第三方 CDN 链接可能过期 / 防盗链 / 走 http 302，GitHub 图片代理未必取得到；
+- 存进仓库后永久可用，也不依赖每天同步时的网络状况。
+
+封面来源按优先级：
+
+1. 数据记录自带的 `cover` 字段（http(s) 链接，若以后导出脚本补上）；
+2. `raw/BOOK.db` → `BOOKLISTTABLE.coverUrl`，再兜底 `CALENDER` / `TIMESTABLE` 的封面列；
+3. 都拿不到 → 自动画一张带书名的 SVG 占位图，**不会出现破图**。
+
+下载时会按**文件头**判断真实格式（URL 里写着 `.webp` 的图经 OSS 转码后实际返回 JPEG，不能信扩展名），
+校验失败或超时的会重试一次，再失败就用占位图。已经下载好的封面会被复用，日常同步零网络请求，
+只有新增书籍或加 `--refresh-covers` 才会重新下载。
+
+相关开关都在 `scripts/config.py`：
+
+| 配置 | 默认 | 作用 |
+| --- | --- | --- |
+| `SHOW_COVERS` | `True` | 总开关，关掉后 README 退回纯文字书单 |
+| `SHOW_COVER_WALL` | `True` | 是否显示顶部封面墙 |
+| `SHOW_COVER_IN_TABLE` | `True` | 是否显示表格封面列 |
+| `COVER_WALL_COLUMNS` / `COVER_WALL_WIDTH` | `6` / `96` | 封面墙每行本数 / 图片宽度 px |
+| `COVER_DIR` | `covers` | 封面存放目录 |
+| `COVER_USE_SOURCE_DB` | `True` | 是否从原始 SQLite 备份里读封面链接 |
+
+命令行可调：`--no-covers`（本次不处理封面）、`--offline`（只用本地缓存，不联网）、
+`--refresh-covers`（强制重下全部）、`--no-db-covers`（不读数据库）、`--covers-dir`（换目录）。
+
+> 删掉某本书后，对应的旧封面文件会留在 `covers/` 里（无害，不会出现在 README 中），
+> 想清理直接删文件即可。
+
+### 以后新增 / 更新的书，封面会自动跟上吗
+
+会 —— 前提是同步 Action 每天能正常跑（配置见下面「你只需要做一件事」）。链路：
+
+1. 在「阅读记录」App 里加书或换封面后，跑源库的 `scripts/sync.py` + `scripts/export.py`。
+   `export.py` 会把 App 的 `BOOK.db` 重新复制成 `raw/BOOK.db`（含新书的 `coverUrl`），
+   这个文件已被源库 git 跟踪，push 之后 CI 就能读到。
+2. Reading 的 Action 检出最新源库 → 生成器按规范化书名匹配到 `coverUrl` →
+   下载进 `covers/` → 写进 README → 自动提交。**新书的 ID 不同，会自然触发下载。**
+3. 某本书换了封面时，`covers/_sources.json` 里记的 URL 会变，生成器自动重下并覆盖；
+   没变化的书全部走本地缓存，零网络请求。原来是占位图的书后来有了封面，也会自动升级。
+
+数据库里也找不到封面时（手工改了 `data/books.json` 没走导出、App 里自建的无封面书等），
+依次兜底：记录里的 `cover` 字段 → ISBN（Open Library）→ 书名 + 作者（Google Books API，
+带书名相关性校验防止配错封面）→ 带书名的 SVG 占位图。API 只在缺封面时请求，
+命中一次就缓存；日志会打印「以下 N 本暂用占位图」，方便发现漏网的书。
+
+最后的人工兜底是仓库根目录下的 `covers.json`（可选，文件不存在就跳过）：
+
+```json
+{
+  "百年孤独": "https://example.com/cover.jpg",
+  "bk_003": "https://example.com/another.jpg"
+}
+```
+
+键可以写书名，也可以写源数据的书籍 ID（如 `bk_003`），优先级高于所有自动渠道。
+改完提交，下次同步即生效。
+
+> 本机网络到 Google Books / Open Library 走代理会 502，所以**本地生成时 API 兜底通常不生效**；
+> GitHub Actions 的海外 runner 能正常访问。想完全离线跑加 `--offline`（只用缓存和占位图），
+> 不想用 API 兜底加 `--no-api-covers`。
 
 ### 本地调试字段识别
 不确定你的字段名有没有被认出来？用 `--dump-fields` 看一眼：
@@ -70,16 +143,20 @@ python scripts/generate_readme.py --source <目录> --dump-fields
 
 ## 本地预览 / 调试
 ```bash
-# 用样例数据生成一次，看 README 长什么样
+# 用样例数据生成一次，看 README 长什么样（样例外链是 example.com，会自动出占位图）
 python scripts/generate_readme.py --source data --output README.md
 
 # 直接指向本地备份目录（Windows 下用 E:/... 这种写法，别用 /e/...，否则 Python 找不到）
+# 这条会把 29 张封面下载到 covers/，再写进 README
 python scripts/generate_readme.py --source E:/project/yuedujilu_backup --output README.md
 # 真实跑时，GitHub 上 source 指向 workflow 检出的 yuedujilu_backup（相对路径 source/）
+# 只想重排文字、不动封面：加 --offline
 ```
 
 ## 常见问题
-- **封面不显示**：封面字段必须是 `http(s)` 绝对链接；私有库里的本地图片路径
-  跨仓库无法引用，建议传图床或用外链。
+- **封面不显示 / 显示成占位图**：先确认 `covers/` 目录已随提交推到 GitHub（工作流
+  `file_pattern` 里包含 `covers/`）；再本地跑一次看日志里的封面统计。`raw/BOOK.db`
+  里读不到封面时会自动用带书名的 SVG 占位图，README 不会出现破图。
+- **只想本地重排、不想联网**：加 `--offline`，会直接复用 `covers/` 里已有的图。
 - **书评太长**：纯文本书评会自动收进 README 末尾的 `<details>` 折叠区，不占表格空间。
 - **首次运行失败**：多半是私有库没配 `SOURCE_TOKEN`，或数据源文件名/格式不符。
