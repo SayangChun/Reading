@@ -1,7 +1,14 @@
 name: Sync Reading List
 
-# 自动化同步：每天北京时间 00:00 拉取私有读书记录仓库，重新生成 README.md 书单。
+# 自动化同步：每天北京时间 00:00 拉取读书记录仓库，重新生成 README.md 书单。
 # 也支持在 Actions 页面点 "Run workflow" 手动触发。
+#
+# 数据源 yuedujilu_backup 默认是私有库：
+#   - 若已改为 Public，GITHUB_TOKEN 即可读取，无需任何 secret；
+#   - 若保持私有，需在 Reading → Settings → Secrets and variables → Actions
+#     添加带 repo 权限的 PAT，名称为 SOURCE_TOKEN。
+# 源库不可达（私有且未配令牌 / 仓库不存在 / 令牌失效）时，本工作流会跳过同步并保留
+# 现有 README，既不报错刷屏，也不会用错误数据覆盖现有书单。
 on:
   schedule:
     - cron: "0 16 * * *"        # UTC 16:00 == 北京时间次日 00:00
@@ -18,15 +25,9 @@ jobs:
       - name: Checkout Reading（本仓库，含生成器）
         uses: actions/checkout@v4
 
-      - name: 检查数据源访问配置
-        env:
-          HAS_SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN != '' }}
-        run: |
-          if [ "$HAS_SOURCE_TOKEN" != "true" ]; then
-            echo "::warning::未配置 SOURCE_TOKEN：若 yuedujilu_backup 仍是私有库，下一步检出会失败。请在 Reading → Settings → Secrets and variables → Actions 添加带 repo 权限的 PAT，或把源库改为 Public。"
-          fi
-
       - name: Checkout 读书记录（数据源）
+        id: source_checkout
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: SayangChun/yuedujilu_backup
@@ -34,16 +35,28 @@ jobs:
           # 数据源是私有库时需要读令牌；公开库则 GITHUB_TOKEN 即可。
           # 私有库请在 Reading → Settings → Secrets → Actions 里加 SOURCE_TOKEN
           # （一个带 repo 权限的 Personal Access Token）。
-          # 下面的表达式：有 SOURCE_TOKEN 用它，否则退回 GITHUB_TOKEN（仅够读公开库）。
           token: ${{ secrets.SOURCE_TOKEN || github.token }}
 
+      - name: 校验数据源是否可用
+        id: guard
+        run: |
+          if [ -f source/data/books.json ] || [ -f source/books.json ] || [ -d source/books ] || [ -d source/data ]; then
+            echo "source_ok=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::数据源检出成功，开始生成书单。"
+          else
+            echo "source_ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未能检出可用的数据源（yuedujilu_backup 可能是私有库且没有配置 SOURCE_TOKEN，或仓库不存在）。本次保留现有 README，不同步，避免覆盖现有内容。请参考 SETUP.md 的「你只需要做一件事」配置访问权限。"
+          fi
+
       - name: Generate README + SHELF（含封面）
-        # README 只展示已读完的书；在读/想读/弃读写入次级页面 SHELF.md。
-        # 封面下载到 covers/ 并用绝对地址引用；已存在的封面复用缓存，
-        # 只有新增书籍 / 换了封面的书才重新下载。
-        run: python scripts/generate_readme.py --source source --output README.md --covers-dir covers
+        if: steps.guard.outputs.source_ok == 'true'
+        continue-on-error: true
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/generate_readme.py --source source --output README.md --covers-dir covers
 
       - name: Commit & Push
+        if: steps.guard.outputs.source_ok == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: auto-sync reading list (with covers)"
